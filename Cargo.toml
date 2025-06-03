@@ -1,0 +1,22 @@
+[package]
+name = "RoseTree"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1", features = [
+  "fs",
+  "rt-multi-thread",
+  "macros",
+  "io-util",
+] }
+rayon = "1"
+dashmap = "6"
+ignore = "0.4"
+chrono = "0.4"
+
+[lints.clippy]
+pedantic = { level = "warn" }
+
+[profile.release]
+lto = "fat"
