@@ -263,18 +263,16 @@ fn find_gitignore_files(base_dir: &Path) -> Vec<GitIgnoreInfo> {
         .ignore(false)
         .git_global(false)
         .git_exclude(false)
-        .filter_entry(|entry| {
-            entry.file_name() == std::ffi::OsStr::new(".gitignore")
-                && !entry.path_is_symlink()
-                && entry.file_type().is_some_and(|ft| ft.is_file())
-        })
+        .git_ignore(false)
+        .filter_entry(|e| e.file_name() != std::ffi::OsStr::new(".git"))
         .build();
 
     for result in walker {
         match result {
             Ok(entry) => {
-                if entry.file_name() == std::ffi::OsStr::new(".gitignore")
-                    && entry.file_type().is_some_and(|ft| ft.is_file())
+                if entry.file_type().is_some_and(|ft| ft.is_file())
+                    && entry.file_name() == std::ffi::OsStr::new(".gitignore")
+                    && !entry.path_is_symlink()
                 {
                     let path = entry.path();
                     let relative_path = path
