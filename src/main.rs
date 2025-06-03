@@ -398,11 +398,12 @@ fn is_utf8_file(path: &Path) -> bool {
                     if bytes_read == 0 {
                         return true;
                     }
-                    if bytes_read >= 3 && buffer[0..3] == [0xEF, 0xBB, 0xBF] {
-                        std::str::from_utf8(&buffer[3..bytes_read]).is_ok()
+                    let data_to_check = if bytes_read >= 3 && buffer[0..3] == [0xEF, 0xBB, 0xBF] {
+                        &buffer[3..bytes_read]
                     } else {
-                        std::str::from_utf8(&buffer[..bytes_read]).is_ok()
-                    }
+                        &buffer[..bytes_read]
+                    };
+                    simdutf8::basic::from_utf8(data_to_check).is_ok()
                 }
                 Err(_) => false,
             }
