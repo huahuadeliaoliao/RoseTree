@@ -101,13 +101,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    println!("\nEnter file type numbers to extract (space-separated, 'all' for all types):");
+    println!("\nEnter file type numbers to extract (space-separated, 'a' for all types):");
     let mut input = String::new();
     io::stdin()
         .read_line(&mut input)
         .map_err(|e| format!("Failed to read input: {e}"))?;
 
-    let selected_extensions: HashSet<String> = if input.trim().to_lowercase() == "all" {
+    let selected_extensions: HashSet<String> = if input.trim().to_lowercase() == "a" {
         extensions_vec.iter().cloned().collect()
     } else {
         input
