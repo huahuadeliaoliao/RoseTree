@@ -1,15 +1,14 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
-use std::io::{self};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use chrono::Local;
 use dashmap::DashMap;
 use ignore::WalkBuilder;
 use rayon::prelude::*;
-use tokio::fs as async_fs;
-use tokio::io::AsyncReadExt;
 
 #[derive(Clone)]
 struct FileInfo {
@@ -18,20 +17,47 @@ struct FileInfo {
     extension: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct GitIgnoreInfo {
     relative_path: String,
 }
 
-#[tokio::main]
+struct Timings {
+    find_gitignore: u128,
+    collect_files: u128,
+    read_contents: u128,
+    generate_tree: u128,
+    generate_output_string: u128,
+    write_file: u128,
+    total: u128,
+}
+
+impl Timings {
+    fn new() -> Self {
+        Timings {
+            find_gitignore: 0,
+            collect_files: 0,
+            read_contents: 0,
+            generate_tree: 0,
+            generate_output_string: 0,
+            write_file: 0,
+            total: 0,
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut timings = Timings::new();
+
     println!("Scanning current directory and subdirectories...");
 
     let current_dir =
         std::env::current_dir().map_err(|e| format!("Unable to get current directory: {e}"))?;
 
-    let gitignore_files = find_gitignore_files(&current_dir)?;
+    let stage_start_time = Instant::now();
+    let gitignore_files = find_gitignore_files(&current_dir);
+    timings.find_gitignore = stage_start_time.elapsed().as_micros();
 
     let use_gitignore = if gitignore_files.is_empty() {
         false
@@ -47,26 +73,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         input.trim().to_lowercase() == "y"
     };
 
+    let stage_start_time = Instant::now();
     let files = if use_gitignore {
         collect_files_with_gitignore(&current_dir)
     } else {
-        collect_files_without_gitignore(&current_dir)?
+        collect_files_without_gitignore(&current_dir)
     };
+    timings.collect_files = stage_start_time.elapsed().as_micros();
 
     if files.is_empty() {
         println!("No UTF-8 readable files found.");
+        timings.total = timings.find_gitignore + timings.collect_files;
+        print_timings(&timings);
         return Ok(());
     }
 
-    let extensions: Vec<String> = files
-        .iter()
-        .map(|f| f.extension.clone())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
+    let extensions_set: HashSet<String> = files.iter().map(|f| f.extension.clone()).collect();
+    let mut extensions_vec: Vec<String> = extensions_set.into_iter().collect();
+    extensions_vec.sort();
 
     println!("\nFound the following UTF-8 file types:");
-    for (i, ext) in extensions.iter().enumerate() {
+    for (i, ext) in extensions_vec.iter().enumerate() {
         println!(
             "{}. {}",
             i + 1,
@@ -81,17 +108,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("Failed to read input: {e}"))?;
 
     let selected_extensions: HashSet<String> = if input.trim().to_lowercase() == "all" {
-        extensions.into_iter().collect()
+        extensions_vec.iter().cloned().collect()
     } else {
         input
             .split_whitespace()
             .filter_map(|s| s.parse::<usize>().ok())
-            .filter_map(|i| extensions.get(i.saturating_sub(1)).cloned())
+            .filter_map(|i| extensions_vec.get(i.saturating_sub(1)).cloned())
             .collect()
     };
 
     if selected_extensions.is_empty() {
         println!("No file types selected.");
+        timings.total = timings.find_gitignore + timings.collect_files;
+        print_timings(&timings);
         return Ok(());
     }
 
@@ -102,35 +131,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if selected_files.is_empty() {
         println!("No matching files found.");
+        timings.total = timings.find_gitignore + timings.collect_files;
+        print_timings(&timings);
         return Ok(());
     }
 
     println!("\nReading file contents...");
+    let stage_start_time = Instant::now();
 
-    let mut tasks = Vec::new();
-    for file in &selected_files {
-        let file = file.clone();
-        let task = tokio::spawn(async move {
-            match read_file_content(&file.path).await {
-                Ok(content) => Some((file, content)),
-                Err(_) => None,
-            }
-        });
-        tasks.push(task);
-    }
+    let file_contents_results: Vec<Result<(FileInfo, String), String>> = selected_files
+        .par_iter()
+        .map(
+            |file_info_to_read| match fs::read_to_string(&file_info_to_read.path) {
+                Ok(content) => Ok((file_info_to_read.clone(), content)),
+                Err(e) => {
+                    let err_msg = format!(
+                        "Warning: Failed to read content of {:?}: {}",
+                        file_info_to_read.path, e
+                    );
+                    eprintln!("{err_msg}");
+                    Err(err_msg)
+                }
+            },
+        )
+        .collect();
 
-    let mut file_contents = Vec::new();
-    for task in tasks {
-        if let Ok(Some(result)) = task.await {
-            file_contents.push(result);
-        }
+    let mut file_contents: Vec<(FileInfo, String)> = file_contents_results
+        .into_iter()
+        .filter_map(Result::ok)
+        .collect();
+
+    timings.read_contents = stage_start_time.elapsed().as_micros();
+
+    if file_contents.is_empty() && !selected_files.is_empty() {
+        println!("All selected files failed to read.");
+        timings.total = timings.find_gitignore + timings.collect_files + timings.read_contents;
+        print_timings(&timings);
+        return Ok(());
     }
 
     file_contents.sort_by(|a, b| a.0.relative_path.cmp(&b.0.relative_path));
 
+    let stage_start_time = Instant::now();
     let tree_structure = generate_tree_structure(&file_contents);
+    timings.generate_tree = stage_start_time.elapsed().as_micros();
 
-    let mut final_content = String::new();
+    let stage_start_time = Instant::now();
+    let estimated_header_footer_size = 1024;
+    let estimated_content_size: usize =
+        file_contents.iter().map(|(_, content)| content.len()).sum();
+    let estimated_path_overhead: usize = file_contents.len() * 200;
+    let total_estimated_capacity = tree_structure.len()
+        + estimated_content_size
+        + estimated_path_overhead
+        + estimated_header_footer_size;
+
+    let mut final_content = String::with_capacity(total_estimated_capacity);
 
     final_content.push_str("File Structure:\n");
     final_content.push_str(&tree_structure);
@@ -141,7 +197,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     final_content.push_str("\n\n");
 
     for (i, (file, content)) in file_contents.iter().enumerate() {
-        final_content.push_str(&format!("{}:\n", file.relative_path));
+        final_content.push_str(&file.relative_path);
+        final_content.push_str(":\n");
         final_content.push_str(&"-".repeat(80));
         final_content.push('\n');
         final_content.push_str(content);
@@ -152,58 +209,92 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             final_content.push_str("\n\n");
         }
     }
+    timings.generate_output_string = stage_start_time.elapsed().as_micros();
 
     let current_time = Local::now();
     let timestamp_str = current_time.format("%Y%m%d_%H%M%S").to_string();
     let filename = format!("rosetree_{timestamp_str}.txt");
 
-    async_fs::write(&filename, final_content)
-        .await
-        .map_err(|e| format!("Failed to write file: {e}"))?;
+    let stage_start_time = Instant::now();
+    fs::write(&filename, final_content).map_err(|e| format!("Failed to write file: {e}"))?;
+    timings.write_file = stage_start_time.elapsed().as_micros();
 
     println!("\nFile contents successfully extracted to: {filename}");
 
+    timings.total = timings.find_gitignore
+        + timings.collect_files
+        + timings.read_contents
+        + timings.generate_tree
+        + timings.generate_output_string
+        + timings.write_file;
+
+    print_timings(&timings);
+
     Ok(())
 }
 
-fn walk_for_gitignore_recursive(
-    dir: &Path,
-    base_dir: &Path,
-    gitignore_files: &mut Vec<GitIgnoreInfo>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let entries = fs::read_dir(dir)?;
+fn print_timings(timings: &Timings) {
+    println!("\nProgram Operation Execution Times (µs):");
+    println!("-------------------------------------------");
+    println!("Find .gitignore files:     {:>10}", timings.find_gitignore);
+    println!("Collect files:             {:>10}", timings.collect_files);
+    println!("Read selected contents:    {:>10}", timings.read_contents);
+    println!("Generate tree structure:   {:>10}", timings.generate_tree);
+    println!(
+        "Generate output string:    {:>10}",
+        timings.generate_output_string
+    );
+    println!("Write to file:             {:>10}", timings.write_file);
+    println!("-------------------------------------------");
+    println!("Total processing time:     {:>10} µs", timings.total);
+    println!(
+        "                           {:>10} ms (approx total)",
+        timings.total / 1000
+    );
+    println!("-------------------------------------------");
+}
 
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
+fn find_gitignore_files(base_dir: &Path) -> Vec<GitIgnoreInfo> {
+    let mut gitignore_files = Vec::new();
+    let walker = WalkBuilder::new(base_dir)
+        .standard_filters(false)
+        .hidden(false)
+        .parents(false)
+        .ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .filter_entry(|entry| {
+            entry.file_name() == std::ffi::OsStr::new(".gitignore")
+                && !entry.path_is_symlink()
+                && entry.file_type().is_some_and(|ft| ft.is_file())
+        })
+        .build();
 
-        if path.is_dir() {
-            if path.file_name().and_then(|n| n.to_str()) == Some(".git") {
-                continue;
+    for result in walker {
+        match result {
+            Ok(entry) => {
+                if entry.file_name() == std::ffi::OsStr::new(".gitignore")
+                    && entry.file_type().is_some_and(|ft| ft.is_file())
+                {
+                    let path = entry.path();
+                    let relative_path = path
+                        .strip_prefix(base_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    gitignore_files.push(GitIgnoreInfo { relative_path });
+                }
             }
-            walk_for_gitignore_recursive(&path, base_dir, gitignore_files)?;
-        } else if path.file_name().and_then(|n| n.to_str()) == Some(".gitignore") {
-            let relative_path = path
-                .strip_prefix(base_dir)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
-
-            gitignore_files.push(GitIgnoreInfo { relative_path });
+            Err(err) => {
+                eprintln!("Warning: Error finding .gitignore files: {err}");
+            }
         }
     }
-    Ok(())
-}
-
-fn find_gitignore_files(base_dir: &Path) -> Result<Vec<GitIgnoreInfo>, Box<dyn std::error::Error>> {
-    let mut gitignore_files = Vec::new();
-    walk_for_gitignore_recursive(base_dir, base_dir, &mut gitignore_files)?;
-    Ok(gitignore_files)
+    gitignore_files
 }
 
 fn collect_files_with_gitignore(base_dir: &Path) -> Vec<FileInfo> {
     let mut files = Vec::new();
-
     let walker = WalkBuilder::new(base_dir)
         .git_ignore(true)
         .git_global(true)
@@ -218,15 +309,9 @@ fn collect_files_with_gitignore(base_dir: &Path) -> Vec<FileInfo> {
         match result {
             Ok(entry) => {
                 let path = entry.path();
-
-                if path.is_dir() {
+                if path.is_dir() || path.components().any(|c| c.as_os_str() == ".git") {
                     continue;
                 }
-
-                if path.components().any(|c| c.as_os_str() == ".git") {
-                    continue;
-                }
-
                 if !is_utf8_file(path) {
                     continue;
                 }
@@ -236,13 +321,11 @@ fn collect_files_with_gitignore(base_dir: &Path) -> Vec<FileInfo> {
                     .unwrap_or(path)
                     .to_string_lossy()
                     .replace('\\', "/");
-
                 let extension = path
                     .extension()
                     .and_then(|e| e.to_str())
                     .unwrap_or("")
                     .to_string();
-
                 files.push(FileInfo {
                     path: path.to_path_buf(),
                     relative_path,
@@ -250,172 +333,194 @@ fn collect_files_with_gitignore(base_dir: &Path) -> Vec<FileInfo> {
                 });
             }
             Err(err) => {
-                eprintln!("Warning: Error walking directory: {err}");
+                eprintln!("Warning: Error walking directory (with gitignore): {err}");
             }
         }
     }
     files
 }
 
-fn collect_files_without_gitignore(
-    base_dir: &Path,
-) -> Result<Vec<FileInfo>, Box<dyn std::error::Error>> {
-    let files = Arc::new(DashMap::new());
-
-    collect_files_recursive(base_dir, base_dir, &files)?;
-
-    Ok(files.iter().map(|entry| entry.value().clone()).collect())
+fn collect_files_without_gitignore(base_dir: &Path) -> Vec<FileInfo> {
+    let files_map = Arc::new(DashMap::new());
+    collect_files_recursive(base_dir, base_dir, &files_map);
+    files_map
+        .iter()
+        .map(|entry| entry.value().clone())
+        .collect()
 }
 
 fn collect_files_recursive(
     dir: &Path,
     base_dir: &Path,
-    files: &Arc<DashMap<PathBuf, FileInfo>>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let entries = fs::read_dir(dir)?;
+    files_map: &Arc<DashMap<PathBuf, FileInfo>>,
+) {
+    let Ok(entries_result) = fs::read_dir(dir) else {
+        eprintln!("Warning: Failed to read directory: {dir:?}");
+        return;
+    };
 
-    let paths: Vec<_> = entries
+    let entries: Vec<PathBuf> = entries_result
         .filter_map(Result::ok)
-        .map(|entry| entry.path())
+        .map(|e| e.path())
         .collect();
 
-    paths.par_iter().for_each(|path| {
+    entries.into_par_iter().for_each(|path| {
         if path.is_dir() {
             if path.file_name().and_then(|n| n.to_str()) == Some(".git") {
                 return;
             }
-            let _ = collect_files_recursive(path, base_dir, files);
-        } else if path.is_file() && is_utf8_file(path) {
+            collect_files_recursive(&path, base_dir, files_map);
+        } else if path.is_file() && is_utf8_file(&path) {
             let relative_path = path
                 .strip_prefix(base_dir)
-                .unwrap_or(path)
+                .unwrap_or(&path)
                 .to_string_lossy()
                 .replace('\\', "/");
-
             let extension = path
                 .extension()
                 .and_then(|e| e.to_str())
                 .unwrap_or("")
                 .to_string();
-
             let file_info = FileInfo {
                 path: path.clone(),
                 relative_path,
                 extension,
             };
-
-            files.insert(path.clone(), file_info);
+            files_map.insert(path.clone(), file_info);
         }
     });
-
-    Ok(())
 }
 
 fn is_utf8_file(path: &Path) -> bool {
-    match fs::read(path) {
-        Ok(bytes) => {
-            let sample_size = std::cmp::min(8192, bytes.len());
-            std::str::from_utf8(&bytes[..sample_size]).is_ok()
+    match fs::File::open(path) {
+        Ok(mut file) => {
+            let mut buffer = [0; 2048];
+            match file.read(&mut buffer) {
+                Ok(bytes_read) => {
+                    if bytes_read == 0 {
+                        return true;
+                    }
+                    if bytes_read >= 3 && buffer[0..3] == [0xEF, 0xBB, 0xBF] {
+                        std::str::from_utf8(&buffer[3..bytes_read]).is_ok()
+                    } else {
+                        std::str::from_utf8(&buffer[..bytes_read]).is_ok()
+                    }
+                }
+                Err(_) => false,
+            }
         }
         Err(_) => false,
     }
 }
 
-async fn read_file_content(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
-    let mut file = async_fs::File::open(path)
-        .await
-        .map_err(|e| format!("Failed to open file {path:?}: {e}"))?;
-
-    let mut content = String::new();
-    file.read_to_string(&mut content)
-        .await
-        .map_err(|e| format!("Failed to read file content {path:?}: {e}"))?;
-
-    Ok(content)
-}
-
 fn generate_tree_structure(files: &[(FileInfo, String)]) -> String {
-    let mut tree = String::new();
-    let mut path_map: HashMap<String, Vec<String>> = HashMap::new();
-    let mut all_paths: HashSet<String> = HashSet::new();
+    let mut path_map: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let mut all_distinct_paths: HashSet<String> = HashSet::new();
 
-    for (file, _) in files {
-        let parts: Vec<&str> = file.relative_path.split('/').collect();
-
-        for i in 1..parts.len() {
-            let dir_path = parts[..i].join("/");
-            all_paths.insert(dir_path);
+    for (file_info, _) in files {
+        let path = Path::new(&file_info.relative_path);
+        all_distinct_paths.insert(file_info.relative_path.clone());
+        let mut current_accumulated_path = PathBuf::new();
+        if let Some(parent_dir) = path.parent() {
+            for component in parent_dir.components() {
+                if let Some(comp_str) = component.as_os_str().to_str() {
+                    if comp_str != "." && comp_str != "/" {
+                        current_accumulated_path.push(comp_str);
+                        if !current_accumulated_path.as_os_str().is_empty() {
+                            all_distinct_paths.insert(
+                                current_accumulated_path
+                                    .to_string_lossy()
+                                    .replace('\\', "/"),
+                            );
+                        }
+                    }
+                }
+            }
         }
-
-        all_paths.insert(file.relative_path.clone());
     }
 
-    for path in &all_paths {
-        let parts: Vec<&str> = path.split('/').collect();
+    for path_str in all_distinct_paths {
+        let p = Path::new(&path_str);
+        let file_name_os = p.file_name().unwrap_or(p.as_os_str());
+        let child_name = file_name_os.to_string_lossy().into_owned();
 
-        if parts.len() == 1 {
+        if let Some(parent_path_os) = p.parent() {
+            let parent_key = if parent_path_os.as_os_str().is_empty() {
+                ".".to_string()
+            } else {
+                parent_path_os.to_string_lossy().replace('\\', "/")
+            };
+            path_map.entry(parent_key).or_default().insert(child_name);
+        } else {
             path_map
                 .entry(".".to_string())
                 .or_default()
-                .push(parts[0].to_string());
-        } else {
-            let parent = parts[..parts.len() - 1].join("/");
-            let name = (*parts.last().unwrap()).to_string();
-            path_map.entry(parent).or_default().push(name);
+                .insert(child_name);
+        }
+    }
+    if files.is_empty()
+        && path_map
+            .get(".")
+            .is_none_or(std::collections::BTreeSet::is_empty)
+    {
+        return ".\n(No files or directories found to list)\n".to_string();
+    } else if files.len() == 1
+        && path_map.get(".").is_some_and(|s| s.len() == 1)
+        && path_map.get(".").unwrap().iter().next().unwrap() == &files[0].0.relative_path
+    {
+    } else if !path_map.contains_key(".") && !files.is_empty() {
+        for (file_info, _) in files {
+            let p = Path::new(&file_info.relative_path);
+            if p.parent().is_none_or(|par| par.as_os_str().is_empty()) {
+                path_map
+                    .entry(".".to_string())
+                    .or_default()
+                    .insert(p.file_name().unwrap().to_string_lossy().into_owned());
+            }
         }
     }
 
-    for children in path_map.values_mut() {
-        children.sort();
-        children.dedup();
+    let mut output_tree_string = String::new();
+    if path_map.contains_key(".") || !files.is_empty() {
+        output_tree_string.push_str(".\n");
     }
-
-    generate_tree_recursive(&path_map, ".", "", &mut tree, true);
-
-    tree
+    generate_tree_recursive(&path_map, ".", "", &mut output_tree_string, true);
+    output_tree_string
 }
 
 fn generate_tree_recursive(
-    path_map: &HashMap<String, Vec<String>>,
-    current_path: &str,
-    prefix: &str,
+    path_map: &HashMap<String, BTreeSet<String>>,
+    current_path_key: &str,
+    prefix_for_children_lines: &str,
     output: &mut String,
-    is_root: bool,
+    is_current_path_conceptual_root: bool,
 ) {
-    if !is_root {
-        let name = current_path.split('/').last().unwrap_or(current_path);
-        output.push_str(&format!("{prefix}{name}\n"));
-    }
+    if let Some(children_names) = path_map.get(current_path_key) {
+        let num_children = children_names.len();
+        for (i, child_name) in children_names.iter().enumerate() {
+            let is_last = i == num_children - 1;
 
-    if let Some(children) = path_map.get(current_path) {
-        let mut sorted_children = children.clone();
-        sorted_children.sort();
+            output.push_str(prefix_for_children_lines);
+            output.push_str(if is_last { "└── " } else { "├── " });
+            output.push_str(child_name);
+            output.push('\n');
 
-        for (i, child) in sorted_children.iter().enumerate() {
-            let is_last = i == sorted_children.len() - 1;
-            let child_prefix = if is_root {
-                if is_last { "└── " } else { "├── " }
+            let child_full_key = if is_current_path_conceptual_root && current_path_key == "." {
+                child_name.clone()
             } else {
-                &format!("{}{}", prefix, if is_last { "└── " } else { "├── " })
+                format!("{current_path_key}/{child_name}")
             };
 
-            let child_path = if current_path == "." {
-                child.clone()
-            } else {
-                format!("{current_path}/{child}")
-            };
-
-            let is_directory = path_map.contains_key(&child_path);
-
-            if is_directory {
-                let new_prefix = if is_root {
-                    if is_last { "    " } else { "│   " }
-                } else {
-                    &format!("{}{}", prefix, if is_last { "    " } else { "│   " })
-                };
-                generate_tree_recursive(path_map, &child_path, new_prefix, output, false);
-            } else {
-                output.push_str(&format!("{child_prefix}{child}\n"));
+            if path_map.contains_key(&child_full_key) {
+                let mut new_prefix_for_grandchildren = prefix_for_children_lines.to_string();
+                new_prefix_for_grandchildren.push_str(if is_last { "   " } else { "│  " });
+                generate_tree_recursive(
+                    path_map,
+                    &child_full_key,
+                    &new_prefix_for_grandchildren,
+                    output,
+                    false,
+                );
             }
         }
     }
