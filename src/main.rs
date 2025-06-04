@@ -392,7 +392,7 @@ fn collect_files_recursive(
 fn is_utf8_file(path: &Path) -> bool {
     match fs::File::open(path) {
         Ok(mut file) => {
-            let mut buffer = [0; 2048];
+            let mut buffer = [0; 8192];
             match file.read(&mut buffer) {
                 Ok(bytes_read) => {
                     if bytes_read == 0 {
