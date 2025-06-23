@@ -73,43 +73,49 @@ Enter file type numbers to extract (space-separated, 'a' for all types):
 
 Reading file contents...
 
-File contents successfully extracted to: rosetree_20240623_143022.txt
+File contents successfully extracted to: rosetree_20240623_143022.md
 ```
 
 ## Output Format
 
-The generated file contains:
+The generated Markdown file contains:
 
-1. **File Structure**: A tree view of all scanned files
-2. **File Contents**: Each file's content with clear separation and headers
+1. **Project Analysis Report**: Structured Markdown document
+2. **File Structure**: A tree view of all scanned files in code blocks  
+3. **File Contents**: Each file's content with syntax highlighting support
 
 Example output structure:
+```markdown
+# Project Analysis Report
+
+## File Structure
+
 ```
-File Structure:
 .
 ├── Cargo.toml
 ├── README.md
 ├── src/
 │   └── main.rs
 └── target/
+```
 
-================================================================================
-File Contents:
-================================================================================
+## File Contents
 
-Cargo.toml:
---------------------------------------------------------------------------------
+### `Cargo.toml`
+
+```toml
 [package]
-name = "rst"
-version = "0.1.0"
+name = "rosetree"
+version = "0.2.0"
 ...
+```
 
-================================================================================
+### `README.md`
 
-README.md:
---------------------------------------------------------------------------------
+```markdown
 # RST (RoseTree)
 ...
+```
 ```
 
 ## Performance
@@ -153,6 +159,13 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 
 ## Changelog
+
+### v0.2.0
+- **Enhanced Output Format**: Switch from plain text to Markdown with syntax highlighting
+- **Improved Internationalization**: All comments translated to English
+- **Better Structure**: Organized output with project analysis report format
+- **Syntax Highlighting**: Support for 15+ programming languages in output
+- **Code Quality**: Improved error handling and code organization
 
 ### v0.1.0
 - Initial release
