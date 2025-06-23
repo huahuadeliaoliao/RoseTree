@@ -137,7 +137,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // 预先按路径排序，避免后续排序
+    // Pre-sort files by path to avoid later sorting
     let mut sorted_files = selected_files;
     sorted_files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
 
@@ -148,17 +148,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // 生成树结构（仅用于结构展示）
+    // Generate tree structure (for display only)
     let stage_start_time = Instant::now();
     let tree_structure = generate_tree_structure_from_files(&sorted_files);
     timings.generate_tree = stage_start_time.elapsed().as_micros();
 
-    // 创建输出文件
+    // Create output file
     let current_time = Local::now();
     let timestamp_str = current_time.format("%Y%m%d_%H%M%S").to_string();
     let filename = format!("rosetree_{timestamp_str}.txt");
 
-    // 使用流式处理：边读边写
+    // Use streaming processing: read and write simultaneously
     let stage_start_time = Instant::now();
     write_files_streaming(&sorted_files, &tree_structure, &filename, &mut timings)?;
     timings.write_file = stage_start_time.elapsed().as_micros();
@@ -336,10 +336,10 @@ fn collect_files_recursive(
 fn is_utf8_file(path: &Path) -> bool {
     match fs::File::open(path) {
         Ok(mut file) => {
-            // content_inspector只检查前1024字节，所以我们只读取1024字节
+            // content_inspector only checks first 1024 bytes, so we only read 1024 bytes
             let mut buffer = [0u8; 1024]; 
             match file.read(&mut buffer) {
-                Ok(0) => true, // 空文件视为文本文件
+                Ok(0) => true, // Empty files are considered text files
                 Ok(bytes_read) => inspect(&buffer[..bytes_read]).is_text(),
                 Err(_) => false,
             }
@@ -348,7 +348,7 @@ fn is_utf8_file(path: &Path) -> bool {
     }
 }
 
-// 预分配的分隔符，避免重复创建
+// Pre-allocated separators to avoid repeated creation
 const SEPARATOR_80: &str = "================================================================================";
 const DASH_80: &str = "--------------------------------------------------------------------------------";
 
@@ -364,7 +364,7 @@ fn write_files_streaming(
         .map_err(|e| format!("Failed to create output file: {e}"))?;
     let mut writer = BufWriter::new(output_file);
     
-    // 写入文件结构
+    // Write file structure
     write!(writer, "File Structure:\n{}\n\n", tree_structure)?;
     write!(writer, "{}\nFile Contents:\n{}\n\n", SEPARATOR_80, SEPARATOR_80)?;
     
@@ -372,7 +372,7 @@ fn write_files_streaming(
     let mut files_processed = 0;
     let mut files_failed = 0;
     
-    // 流式处理每个文件
+    // Stream process each file
     for (i, file_info) in files.iter().enumerate() {
         match read_and_write_file(&mut writer, file_info) {
             Ok(()) => {
@@ -390,7 +390,7 @@ fn write_files_streaming(
     
     writer.flush()?;
     timings.read_contents = stage_start_time.elapsed().as_micros();
-    timings.generate_output_string = 0; // 已包含在流式处理中
+    timings.generate_output_string = 0; // Already included in streaming process
     
     if files_processed == 0 && files_failed > 0 {
         return Err("All selected files failed to read.".into());
@@ -404,10 +404,10 @@ fn read_and_write_file(
     writer: &mut BufWriter<fs::File>,
     file_info: &FileInfo,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // 写入文件头
+    // Write file header
     write!(writer, "{}:\n{}\n", file_info.relative_path, DASH_80)?;
     
-    // 流式读取并写入文件内容
+    // Stream read and write file content
     let file = fs::File::open(&file_info.path)?;
     let mut reader = BufReader::new(file);
     let mut line = String::new();
@@ -422,7 +422,7 @@ fn read_and_write_file(
 }
 
 fn generate_tree_structure_from_files(files: &[FileInfo]) -> String {
-    // 重用原有逻辑，但直接从FileInfo生成
+    // Reuse existing logic but generate directly from FileInfo
     let file_tuples: Vec<(FileInfo, String)> = files.iter()
         .map(|f| (f.clone(), String::new()))
         .collect();
