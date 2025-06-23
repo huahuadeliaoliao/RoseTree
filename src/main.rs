@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::Local;
+use content_inspector::inspect;
 use dashmap::DashMap;
 use ignore::WalkBuilder;
 use rayon::prelude::*;
@@ -392,19 +393,11 @@ fn collect_files_recursive(
 fn is_utf8_file(path: &Path) -> bool {
     match fs::File::open(path) {
         Ok(mut file) => {
-            let mut buffer = [0; 8192];
+            // content_inspector只检查前1024字节，所以我们只读取1024字节
+            let mut buffer = [0u8; 1024]; 
             match file.read(&mut buffer) {
-                Ok(bytes_read) => {
-                    if bytes_read == 0 {
-                        return true;
-                    }
-                    let data_to_check = if bytes_read >= 3 && buffer[0..3] == [0xEF, 0xBB, 0xBF] {
-                        &buffer[3..bytes_read]
-                    } else {
-                        &buffer[..bytes_read]
-                    };
-                    simdutf8::basic::from_utf8(data_to_check).is_ok()
-                }
+                Ok(0) => true, // 空文件视为文本文件
+                Ok(bytes_read) => inspect(&buffer[..bytes_read]).is_text(),
                 Err(_) => false,
             }
         }

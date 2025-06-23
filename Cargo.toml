@@ -2,13 +2,22 @@
 name = "rst"
 version = "0.1.0"
 edition = "2024"
+description = "A fast command-line tool for scanning directories, analyzing file structures, and extracting file contents with gitignore support"
+authors = ["Florian Liao <huahuadeliaoliao@icloud.com>"]
+license = "Apache-2.0"
+repository = "https://github.com/huahuadeliaoliao/RoseTree"
+homepage = "https://github.com/huahuadeliaoliao/RoseTree"
+documentation = "https://docs.rs/rst"
+readme = "README.md"
+keywords = ["file", "scanner", "directory", "tree", "extract"]
+categories = ["command-line-utilities", "filesystem"]
 
 [dependencies]
 rayon = "1"
 chrono = "0.4"
 ignore = "0.4"
 dashmap = "6"
-simdutf8 = "0.1"
+content_inspector = "0.2"
 
 [lints.clippy]
 pedantic = { level = "warn" }
