@@ -15,7 +15,7 @@ A fast and efficient command-line tool for scanning directories, analyzing file 
 ## Installation
 
 ```bash
-cargo install rst
+cargo install rosetree
 ```
 
 ### From Source (Development)
