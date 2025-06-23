@@ -156,7 +156,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create output file
     let current_time = Local::now();
     let timestamp_str = current_time.format("%Y%m%d_%H%M%S").to_string();
-    let filename = format!("rosetree_{timestamp_str}.txt");
+    let filename = format!("rosetree_{timestamp_str}.md");
 
     // Use streaming processing: read and write simultaneously
     let stage_start_time = Instant::now();
@@ -297,7 +297,7 @@ fn collect_files_recursive(
     files_map: &Arc<DashMap<PathBuf, FileInfo>>,
 ) {
     let Ok(entries_result) = fs::read_dir(dir) else {
-        eprintln!("Warning: Failed to read directory: {dir:?}");
+        eprintln!("Warning: Failed to read directory: {}", dir.display());
         return;
     };
 
@@ -348,9 +348,6 @@ fn is_utf8_file(path: &Path) -> bool {
     }
 }
 
-// Pre-allocated separators to avoid repeated creation
-const SEPARATOR_80: &str = "================================================================================";
-const DASH_80: &str = "--------------------------------------------------------------------------------";
 
 fn write_files_streaming(
     files: &[FileInfo],
@@ -364,22 +361,20 @@ fn write_files_streaming(
         .map_err(|e| format!("Failed to create output file: {e}"))?;
     let mut writer = BufWriter::new(output_file);
     
-    // Write file structure
-    write!(writer, "File Structure:\n{}\n\n", tree_structure)?;
-    write!(writer, "{}\nFile Contents:\n{}\n\n", SEPARATOR_80, SEPARATOR_80)?;
+    // Write Markdown formatted project analysis report
+    write!(writer, "# Project Analysis Report\n\n")?;
+    write!(writer, "## File Structure\n\n```\n{tree_structure}```\n\n")?;
+    write!(writer, "## File Contents\n\n")?;
     
     let stage_start_time = Instant::now();
     let mut files_processed = 0;
     let mut files_failed = 0;
     
     // Stream process each file
-    for (i, file_info) in files.iter().enumerate() {
+    for file_info in files {
         match read_and_write_file(&mut writer, file_info) {
             Ok(()) => {
                 files_processed += 1;
-                if i < files.len() - 1 {
-                    write!(writer, "{}\n\n", SEPARATOR_80)?;
-                }
             }
             Err(e) => {
                 eprintln!("Warning: Failed to read {}: {}", file_info.relative_path, e);
@@ -396,7 +391,7 @@ fn write_files_streaming(
         return Err("All selected files failed to read.".into());
     }
     
-    println!("Successfully processed {} files ({} failed)", files_processed, files_failed);
+    println!("Successfully processed {files_processed} files ({files_failed} failed)");
     Ok(())
 }
 
@@ -404,8 +399,12 @@ fn read_and_write_file(
     writer: &mut BufWriter<fs::File>,
     file_info: &FileInfo,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Write file header
-    write!(writer, "{}:\n{}\n", file_info.relative_path, DASH_80)?;
+    // Write Markdown file header
+    write!(writer, "### `{}`\n\n", file_info.relative_path)?;
+    
+    // Determine syntax highlighting type based on extension
+    let language = get_language_from_extension(&file_info.extension);
+    writeln!(writer, "```{language}")?;
     
     // Stream read and write file content
     let file = fs::File::open(&file_info.path)?;
@@ -417,8 +416,33 @@ fn read_and_write_file(
         line.clear();
     }
     
-    writer.write_all(b"\n")?;
+    write!(writer, "```\n\n")?;
     Ok(())
+}
+
+fn get_language_from_extension(extension: &str) -> &'static str {
+    match extension {
+        "rs" => "rust",
+        "js" => "javascript",
+        "ts" => "typescript",
+        "py" => "python",
+        "go" => "go",
+        "java" => "java",
+        "c" | "h" | "hpp" => "c",
+        "cpp" | "cc" | "cxx" => "cpp",
+        "html" => "html",
+        "css" => "css",
+        "json" => "json",
+        "xml" => "xml",
+        "yaml" | "yml" => "yaml",
+        "toml" => "toml",
+        "md" => "markdown",
+        "sh" => "bash",
+        "sql" => "sql",
+        "dockerfile" => "dockerfile",
+        "makefile" => "makefile",
+        _ => "", // No syntax highlighting
+    }
 }
 
 fn generate_tree_structure_from_files(files: &[FileInfo]) -> String {
