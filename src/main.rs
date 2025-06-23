@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -137,87 +137,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    println!("\nReading file contents...");
-    let stage_start_time = Instant::now();
+    // 预先按路径排序，避免后续排序
+    let mut sorted_files = selected_files;
+    sorted_files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
 
-    let file_contents_results: Vec<Result<(FileInfo, String), String>> = selected_files
-        .par_iter()
-        .map(
-            |file_info_to_read| match fs::read_to_string(&file_info_to_read.path) {
-                Ok(content) => Ok((file_info_to_read.clone(), content)),
-                Err(e) => {
-                    let err_msg = format!(
-                        "Warning: Failed to read content of {:?}: {}",
-                        file_info_to_read.path, e
-                    );
-                    eprintln!("{err_msg}");
-                    Err(err_msg)
-                }
-            },
-        )
-        .collect();
-
-    let mut file_contents: Vec<(FileInfo, String)> = file_contents_results
-        .into_iter()
-        .filter_map(Result::ok)
-        .collect();
-
-    timings.read_contents = stage_start_time.elapsed().as_micros();
-
-    if file_contents.is_empty() && !selected_files.is_empty() {
-        println!("All selected files failed to read.");
-        timings.total = timings.find_gitignore + timings.collect_files + timings.read_contents;
+    if sorted_files.is_empty() {
+        println!("No matching files found.");
+        timings.total = timings.find_gitignore + timings.collect_files;
         print_timings(&timings);
         return Ok(());
     }
 
-    file_contents.sort_by(|a, b| a.0.relative_path.cmp(&b.0.relative_path));
-
+    // 生成树结构（仅用于结构展示）
     let stage_start_time = Instant::now();
-    let tree_structure = generate_tree_structure(&file_contents);
+    let tree_structure = generate_tree_structure_from_files(&sorted_files);
     timings.generate_tree = stage_start_time.elapsed().as_micros();
 
-    let stage_start_time = Instant::now();
-    let estimated_header_footer_size = 1024;
-    let estimated_content_size: usize =
-        file_contents.iter().map(|(_, content)| content.len()).sum();
-    let estimated_path_overhead: usize = file_contents.len() * 200;
-    let total_estimated_capacity = tree_structure.len()
-        + estimated_content_size
-        + estimated_path_overhead
-        + estimated_header_footer_size;
-
-    let mut final_content = String::with_capacity(total_estimated_capacity);
-
-    final_content.push_str("File Structure:\n");
-    final_content.push_str(&tree_structure);
-    final_content.push_str("\n\n");
-    final_content.push_str(&"=".repeat(80));
-    final_content.push_str("\nFile Contents:\n");
-    final_content.push_str(&"=".repeat(80));
-    final_content.push_str("\n\n");
-
-    for (i, (file, content)) in file_contents.iter().enumerate() {
-        final_content.push_str(&file.relative_path);
-        final_content.push_str(":\n");
-        final_content.push_str(&"-".repeat(80));
-        final_content.push('\n');
-        final_content.push_str(content);
-        final_content.push('\n');
-
-        if i < file_contents.len() - 1 {
-            final_content.push_str(&"=".repeat(80));
-            final_content.push_str("\n\n");
-        }
-    }
-    timings.generate_output_string = stage_start_time.elapsed().as_micros();
-
+    // 创建输出文件
     let current_time = Local::now();
     let timestamp_str = current_time.format("%Y%m%d_%H%M%S").to_string();
     let filename = format!("rosetree_{timestamp_str}.txt");
 
+    // 使用流式处理：边读边写
     let stage_start_time = Instant::now();
-    fs::write(&filename, final_content).map_err(|e| format!("Failed to write file: {e}"))?;
+    write_files_streaming(&sorted_files, &tree_structure, &filename, &mut timings)?;
     timings.write_file = stage_start_time.elapsed().as_micros();
 
     println!("\nFile contents successfully extracted to: {filename}");
@@ -403,6 +346,87 @@ fn is_utf8_file(path: &Path) -> bool {
         }
         Err(_) => false,
     }
+}
+
+// 预分配的分隔符，避免重复创建
+const SEPARATOR_80: &str = "================================================================================";
+const DASH_80: &str = "--------------------------------------------------------------------------------";
+
+fn write_files_streaming(
+    files: &[FileInfo],
+    tree_structure: &str,
+    filename: &str,
+    timings: &mut Timings,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("\nWriting file contents...");
+    
+    let output_file = fs::File::create(filename)
+        .map_err(|e| format!("Failed to create output file: {e}"))?;
+    let mut writer = BufWriter::new(output_file);
+    
+    // 写入文件结构
+    write!(writer, "File Structure:\n{}\n\n", tree_structure)?;
+    write!(writer, "{}\nFile Contents:\n{}\n\n", SEPARATOR_80, SEPARATOR_80)?;
+    
+    let stage_start_time = Instant::now();
+    let mut files_processed = 0;
+    let mut files_failed = 0;
+    
+    // 流式处理每个文件
+    for (i, file_info) in files.iter().enumerate() {
+        match read_and_write_file(&mut writer, file_info) {
+            Ok(()) => {
+                files_processed += 1;
+                if i < files.len() - 1 {
+                    write!(writer, "{}\n\n", SEPARATOR_80)?;
+                }
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to read {}: {}", file_info.relative_path, e);
+                files_failed += 1;
+            }
+        }
+    }
+    
+    writer.flush()?;
+    timings.read_contents = stage_start_time.elapsed().as_micros();
+    timings.generate_output_string = 0; // 已包含在流式处理中
+    
+    if files_processed == 0 && files_failed > 0 {
+        return Err("All selected files failed to read.".into());
+    }
+    
+    println!("Successfully processed {} files ({} failed)", files_processed, files_failed);
+    Ok(())
+}
+
+fn read_and_write_file(
+    writer: &mut BufWriter<fs::File>,
+    file_info: &FileInfo,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // 写入文件头
+    write!(writer, "{}:\n{}\n", file_info.relative_path, DASH_80)?;
+    
+    // 流式读取并写入文件内容
+    let file = fs::File::open(&file_info.path)?;
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    
+    while reader.read_line(&mut line)? > 0 {
+        writer.write_all(line.as_bytes())?;
+        line.clear();
+    }
+    
+    writer.write_all(b"\n")?;
+    Ok(())
+}
+
+fn generate_tree_structure_from_files(files: &[FileInfo]) -> String {
+    // 重用原有逻辑，但直接从FileInfo生成
+    let file_tuples: Vec<(FileInfo, String)> = files.iter()
+        .map(|f| (f.clone(), String::new()))
+        .collect();
+    generate_tree_structure(&file_tuples)
 }
 
 fn generate_tree_structure(files: &[(FileInfo, String)]) -> String {
