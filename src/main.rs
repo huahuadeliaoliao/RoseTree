@@ -334,18 +334,115 @@ fn collect_files_recursive(
 }
 
 fn is_utf8_file(path: &Path) -> bool {
+    // First check by file extension for known text file types
+    if is_known_text_extension(path) {
+        return true;
+    }
+    
+    // For unknown extensions, perform content inspection
     match fs::File::open(path) {
         Ok(mut file) => {
-            // content_inspector only checks first 1024 bytes, so we only read 1024 bytes
-            let mut buffer = [0u8; 1024]; 
+            // Read up to 8KB for better detection accuracy
+            let mut buffer = [0u8; 8192]; 
             match file.read(&mut buffer) {
                 Ok(0) => true, // Empty files are considered text files
-                Ok(bytes_read) => inspect(&buffer[..bytes_read]).is_text(),
+                Ok(bytes_read) => {
+                    let sample = &buffer[..bytes_read];
+                    
+                    // Multiple checks for better accuracy:
+                    // 1. Use content_inspector as primary check
+                    if inspect(sample).is_text() {
+                        return true;
+                    }
+                    
+                    // 2. Check if it's valid UTF-8 and contains mostly printable chars
+                    if let Ok(text) = std::str::from_utf8(sample) {
+                        return is_mostly_printable_text(text);
+                    }
+                    
+                    // 3. Final fallback: very small files with some text content
+                    if bytes_read < 256 && has_some_text_chars(sample) {
+                        return true;
+                    }
+                    
+                    false
+                }
                 Err(_) => false,
             }
         }
         Err(_) => false,
     }
+}
+
+fn is_known_text_extension(path: &Path) -> bool {
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        let ext_lower = ext.to_lowercase();
+        matches!(ext_lower.as_str(),
+            // Programming languages
+            "rs" | "py" | "js" | "ts" | "jsx" | "tsx" | "java" | "c" | "cpp" | "cc" | "cxx" | 
+            "h" | "hpp" | "cs" | "php" | "rb" | "go" | "kt" | "swift" | "scala" | "clj" | 
+            "hs" | "elm" | "erl" | "ex" | "exs" | "ml" | "fs" | "vb" | "pas" | "pl" | "pm" |
+            "r" | "jl" | "m" | "mm" | "f" | "f90" | "f95" | "ada" | "d" | "nim" | "zig" |
+            
+            // Web and markup
+            "html" | "htm" | "xml" | "xhtml" | "svg" | "css" | "scss" | "sass" | "less" |
+            "vue" | "svelte" | "astro" | "ejs" | "handlebars" | "hbs" |
+            
+            // Data formats
+            "json" | "yaml" | "yml" | "toml" | "ini" | "cfg" | "conf" | "properties" |
+            "csv" | "tsv" | "txt" | "log" |
+            
+            // Documentation
+            "md" | "markdown" | "rst" | "tex" | "latex" | "org" | "adoc" | "asciidoc" |
+            
+            // Scripts and config
+            "sh" | "bash" | "zsh" | "fish" | "ps1" | "cmd" | "bat" | "dockerfile" |
+            "makefile" | "mk" | "cmake" | "ninja" | "gradle" | "ant" |
+            
+            // Other common text files
+            "gitignore" | "gitattributes" | "editorconfig" | "prettierrc" | "eslintrc" |
+            "tsconfig" | "package" | "cargo" | "gemfile" | "pipfile" | "requirements" |
+            "license" | "readme" | "changelog" | "authors" | "contributors" | "todo"
+        )
+    } else {
+        // Files without extension that are commonly text files
+        if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+            let filename_lower = filename.to_lowercase();
+            matches!(filename_lower.as_str(),
+                "makefile" | "dockerfile" | "cmakelists.txt" | "readme" | "license" | 
+                "changelog" | "authors" | "contributors" | "todo" | "news" | "install" |
+                "copying" | "notice" | "manifest" | "version" | "gemfile" | "rakefile" |
+                "pipfile" | "procfile" | "vagrantfile" | "gruntfile" | "gulpfile" |
+                ".gitignore" | ".gitattributes" | ".editorconfig" | ".prettierrc" |
+                ".eslintrc" | ".babelrc" | ".npmrc" | ".yarnrc"
+            )
+        } else {
+            false
+        }
+    }
+}
+
+fn is_mostly_printable_text(text: &str) -> bool {
+    if text.is_empty() {
+        return true;
+    }
+    
+    let total_chars = text.chars().count();
+    let printable_chars = text.chars()
+        .filter(|&c| c.is_ascii_graphic() || c.is_ascii_whitespace() || !c.is_ascii())
+        .count();
+    
+    // At least 85% of characters should be printable
+    (printable_chars as f64 / total_chars as f64) >= 0.85
+}
+
+fn has_some_text_chars(data: &[u8]) -> bool {
+    let text_chars = data.iter()
+        .filter(|&&b| b.is_ascii_alphabetic() || b.is_ascii_digit() || b.is_ascii_whitespace())
+        .count();
+    
+    // For very small files, if at least 50% are text characters, consider it text
+    (text_chars as f64 / data.len() as f64) >= 0.5
 }
 
 
